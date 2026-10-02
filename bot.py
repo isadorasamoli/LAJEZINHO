@@ -1,11 +1,14 @@
 # ==============================================================================
 # BOT DE SUPORTE E CARGOS - LIGA ACADÊMICA DE JOGOS ELETRÔNICOS
 # ==============================================================================
+# Migrado para a nova SDK oficial google-genai (gemini-3.8-flash)
+# ==============================================================================
 import os
 import asyncio
 import discord
 from discord.ext import commands
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 from dotenv import load_dotenv
 
 # Importa o mini-servidor Flask para manter o bot online no Render
@@ -17,18 +20,19 @@ load_dotenv()
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TARGET_CHANNEL_NAME = os.getenv("CANAL_SUPORTE", "suporte").lower()
-MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+MODEL_NAME = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
 
 if not DISCORD_TOKEN:
-    raise ValueError("ERRO: DISCORD_TOKEN não foi configurado!")
+    raise ValueError("ERRO CRÍTICO: DISCORD_TOKEN não foi configurado!")
 
 if not GEMINI_API_KEY:
-    raise ValueError("ERRO: GEMINI_API_KEY não foi configurada!")
+    raise ValueError("ERRO CRÍTICO: GEMINI_API_KEY não foi configurada!")
 
 # ------------------------------------------------------------------------------
-# 1. CONFIGURAÇÃO DA IA GEMINI
+# 1. CONFIGURAÇÃO DA NOVA SDK DO GEMINI (GOOGLE-GENAI)
 # ------------------------------------------------------------------------------
-genai.configure(api_key=GEMINI_API_KEY)
+# Inicializa o cliente oficial da nova SDK google-genai
+ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 SYSTEM_INSTRUCTION = (
     "Você é o assistente virtual de suporte da Liga Acadêmica de Jogos Eletrônicos "
@@ -39,29 +43,6 @@ SYSTEM_INSTRUCTION = (
     "registrado para os mentores técnicos e diretoria."
 )
 
-generation_config = {
-    "temperature": 0.7,
-    "top_p": 0.95,
-    "max_output_tokens": 1000,
-}
-
-def get_generative_model(model_name=MODEL_NAME):
-    try:
-        return genai.GenerativeModel(
-            model_name=model_name,
-            generation_config=generation_config,
-            system_instruction=SYSTEM_INSTRUCTION
-        )
-    except Exception as e:
-        print(f"⚠️ Erro ao inicializar {model_name}: {e}. Usando modelo de fallback...")
-        return genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            generation_config=generation_config,
-            system_instruction=SYSTEM_INSTRUCTION
-        )
-
-model = get_generative_model()
-
 # ------------------------------------------------------------------------------
 # 2. CONFIGURAÇÃO DO BOT DISCORD E REACTION ROLES
 # ------------------------------------------------------------------------------
@@ -69,7 +50,7 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.guilds = True
 intents.messages = True
-intents.members = True  # Necessário para adicionar/remover cargos dos membros
+intents.members = True  # Necessário para gerenciar cargos dos membros
 
 bot = commands.Bot(
     command_prefix="!", 
@@ -102,6 +83,7 @@ async def on_ready():
     print("=" * 60)
     print(f"🤖 Bot conectado como: {bot.user.name} ({bot.user.id})")
     print(f"📡 Monitorando canal de suporte: #{TARGET_CHANNEL_NAME}")
+    print(f"🧠 Modelo Gemini ativo (google-genai): {MODEL_NAME}")
     print(f"🎭 Cargos por reação ativados: {list(CARGOS_EMOJIS.values())}")
     print("=" * 60)
     
@@ -127,10 +109,9 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if not guild:
         return
 
-    # Procura o cargo no servidor
     role = discord.utils.find(lambda r: r.name.lower() == nome_cargo.lower(), guild.roles)
 
-    # Se o cargo não existir, o bot cria automaticamente com cor personalizada!
+    # Se o cargo não existir, o bot cria automaticamente com cor temática!
     if not role:
         try:
             cores = {
@@ -150,19 +131,18 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
             print(f"❌ Permissão insuficiente: O bot precisa de 'Gerenciar Cargos' para criar '{nome_cargo}'.")
             return
 
-    # Adiciona o cargo ao membro
     member = payload.member or guild.get_member(payload.user_id)
     if member and role:
         try:
             await member.add_roles(role, reason=f"Escolha de área {nome_cargo} por reação")
             print(f"✅ Cargo [{nome_cargo}] concedido a @{member.display_name}")
         except discord.Forbidden:
-            print(f"❌ Erro de Hierarquia: O cargo do bot precisa estar ACIMA do cargo '{nome_cargo}' em Configurações do Servidor > Cargos!")
+            print(f"❌ Erro de Hierarquia: O cargo do bot precisa estar ACIMA do cargo '{nome_cargo}' na lista de cargos!")
 
 
 @bot.event
 async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
-    """Remove o cargo quando o membro desmarca o emoji."""
+    """Remove o cargo quando o membro desmarca a reação de emoji."""
     emoji_str = str(payload.emoji)
     nome_cargo = obter_cargo_por_emoji(emoji_str)
     if not nome_cargo:
@@ -193,11 +173,11 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
 
 @bot.event
 async def on_message(message: discord.Message):
-    """Monitora mensagens para comandos e tickets no canal #suporte."""
+    """Monitora mensagens para comandos e atendimento de tickets em #suporte."""
     if message.author.bot:
         return
 
-    # Se for comando, executa e não abre ticket
+    # Se for comando com '!', executa e não abre ticket
     if message.content.strip().startswith("!"):
         await bot.process_commands(message)
         return
@@ -230,54 +210,85 @@ async def on_message(message: discord.Message):
                     reason=f"Ticket aberto por {message.author.name}"
                 )
 
+                # Mostra o status de digitando enquanto a IA gera a resposta
                 async with thread.typing():
-                    prompt = f"O membro {message.author.display_name} enviou no suporte:\n\n\"{message.clean_content}\""
+                    prompt_context = (
+                        f"O membro {message.author.display_name} (ID: {message.author.id}) "
+                        f"enviou a seguinte mensagem no suporte:\n\n\"{message.clean_content}\""
+                    )
 
+                    # Chamada nativa assíncrona da nova SDK google-genai
                     try:
-                        loop = asyncio.get_running_loop()
-                        response = await loop.run_in_executor(None, lambda: model.generate_content(prompt))
-                        resposta_ia = response.text.strip() if response.text else "Olá! Seu ticket foi registrado. A diretoria vai analisar em breve!"
+                        response = await ai_client.aio.models.generate_content(
+                            model=MODEL_NAME,
+                            contents=prompt_context,
+                            config=types.GenerateContentConfig(
+                                system_instruction=SYSTEM_INSTRUCTION,
+                                temperature=0.7,
+                                top_p=0.95,
+                                max_output_tokens=1000
+                            )
+                        )
+                        resposta_ia = response.text.strip() if response.text else (
+                            "Olá! Seu ticket foi registrado com sucesso. Nossa diretoria "
+                            "vai analisar a sua solicitação em breve!"
+                        )
                     except Exception as gemini_err:
-                        print(f"Erro Gemini: {gemini_err}")
-                        resposta_ia = f"Olá {message.author.mention}! Seu ticket foi registrado. A diretoria e os mentores técnicos foram notificados!"
+                        print(f"⚠️ Erro ao consultar Gemini AI (google-genai): {gemini_err}")
+                        resposta_ia = (
+                            f"Olá {message.author.mention}! Seu ticket foi registrado no sistema da Liga Acadêmica de Jogos 🎮.\n\n"
+                            "Nossa diretoria e mentores técnicos foram notificados e responderão aqui em breve."
+                        )
 
+                # Monta o cartão visual do ticket
                 embed = discord.Embed(
-                    title="🎮 Liga Acadêmica de Jogos Eletrônicos | Atendimento",
+                    title="🎮 Liga Acadêmica de Jogos Eletrônicos | Atendimento Inicial",
                     description=resposta_ia,
                     color=discord.Color.from_rgb(88, 101, 242)
                 )
+                embed.set_author(
+                    name=f"Atendimento: {message.author.display_name}",
+                    icon_url=message.author.display_avatar.url if message.author.display_avatar else None
+                )
                 embed.add_field(
                     name="📌 Próximos Passos",
-                    value="• Envie prints, logs ou arquivos aqui nesta thread.\n• Quando resolver, use `!fechar`.",
+                    value=(
+                        "• Se tiver prints de código, logs de erro ou arte, envie aqui nesta thread.\n"
+                        "• Um mentor ou membro da diretoria responderá em breve.\n"
+                        "• Quando o problema for resolvido, use `!fechar`."
+                    ),
                     inline=False
                 )
+                embed.set_footer(text="Sistema de Tickets Automatizado · Liga de Jogos")
 
                 try:
                     await thread.send(content=f"👋 Olá {message.author.mention}, seja bem-vindo ao seu ticket!", embed=embed)
                 except discord.Forbidden:
-                    await thread.send(
-                        content=f"👋 Olá {message.author.mention}!\n\n**Atendimento da Liga:**\n{resposta_ia}\n\n📌 *Quando resolvido, use `!fechar`.*"
+                    texto_puro = (
+                        f"👋 Olá {message.author.mention}, seja bem-vindo ao seu ticket!\n\n"
+                        f"**🎮 Atendimento Inicial da Liga de Jogos:**\n{resposta_ia}\n\n"
+                        f"📌 **Próximos Passos:** Envie prints e logs aqui. Quando resolvido, use `!fechar`."
                     )
+                    await thread.send(content=texto_puro)
 
             except discord.Forbidden:
                 try:
-                    await message.channel.send(f"⚠️ {message.author.mention}, o bot precisa da permissão 'Criar Tópicos Públicos' para abrir o ticket!")
+                    await message.channel.send(
+                        f"⚠️ {message.author.mention}, o bot precisa da permissão 'Criar Tópicos Públicos' para abrir o ticket!"
+                    )
                 except Exception:
                     pass
             except Exception as e:
-                print(f"Erro no ticket: {e}")
+                print(f"❌ Erro ao processar ticket: {e}")
 
 
 # ------------------------------------------------------------------------------
-# 4. COMANDOS ÚTEIS
+# 4. COMANDOS ÚTEIS ADICIONAIS
 # ------------------------------------------------------------------------------
 @bot.command(name="cargos", aliases=["painelcargos", "escolhercargos"])
 @commands.has_permissions(administrator=True)
 async def criar_painel_cargos(ctx: commands.Context):
-    """
-    Cria a mensagem com as reações de emoji para os membros escolherem sua área.
-    Uso: !cargos (digite no canal desejado, ex: #cargos ou #boas-vindas)
-    """
+    """Cria a mensagem interativa para escolha de área por reação."""
     embed = discord.Embed(
         title="🎮 Escolha sua Área na Liga Acadêmica de Jogos!",
         description=(
@@ -298,7 +309,6 @@ async def criar_painel_cargos(ctx: commands.Context):
 
     painel = await ctx.send(embed=embed)
 
-    # O bot adiciona os 4 emojis automaticamente na mensagem
     for emoji in CARGOS_EMOJIS.keys():
         await painel.add_reaction(emoji)
 
@@ -310,7 +320,7 @@ async def criar_painel_cargos(ctx: commands.Context):
 
 @bot.command(name="ping", aliases=["teste"])
 async def ping_teste(ctx: commands.Context):
-    """Comando de teste rápido de conexão."""
+    """Comando de teste rápido de latência."""
     latencia = round(bot.latency * 1000)
     await ctx.send(f"🏓 **Pong!** O bot da Liga está ativo e respondendo! (Latência: `{latencia}ms`)")
 
@@ -318,7 +328,7 @@ async def ping_teste(ctx: commands.Context):
 @bot.command(name="status", aliases=["mudarstatus"])
 @commands.has_permissions(administrator=True)
 async def mudar_status(ctx: commands.Context, tipo: str = "jogando", *, texto: str = "Criando jogos na Liga"):
-    """Exemplo: !status jogando Godot 4"""
+    """Permite alterar o status do bot pelo chat."""
     tipo_lower = tipo.lower()
     if tipo_lower in ["jogando", "game", "play"]:
         act = discord.Game(name=texto)
@@ -332,12 +342,12 @@ async def mudar_status(ctx: commands.Context, tipo: str = "jogando", *, texto: s
         act = discord.Activity(type=discord.ActivityType.playing, name=f"{tipo} {texto}")
 
     await bot.change_presence(status=discord.Status.online, activity=act)
-    await ctx.send(f"✅ Status atualizado para: **{tipo.capitalize()} {texto}**")
+    await ctx.send(f"✅ Status do bot atualizado para: **{tipo.capitalize()} {texto}**")
 
 
 @bot.command(name="fechar", aliases=["close"])
 async def fechar_ticket(ctx: commands.Context):
-    """Tranca e arquiva a Thread de suporte."""
+    """Tranca e arquiva a thread de suporte."""
     if isinstance(ctx.channel, discord.Thread):
         embed = discord.Embed(
             title="🔒 Ticket Finalizado",
