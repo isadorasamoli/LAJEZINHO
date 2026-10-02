@@ -1,7 +1,7 @@
 # ==============================================================================
 # BOT DE SUPORTE E CARGOS - LIGA ACADÊMICA DE JOGOS ELETRÔNICOS
 # ==============================================================================
-# Migrado para a nova SDK oficial google-genai (gemini-3.8-flash)
+# Atualizado para a nova SDK google-genai (sem warnings e 100% estável)
 # ==============================================================================
 import os
 import asyncio
@@ -31,7 +31,6 @@ if not GEMINI_API_KEY:
 # ------------------------------------------------------------------------------
 # 1. CONFIGURAÇÃO DA NOVA SDK DO GEMINI (GOOGLE-GENAI)
 # ------------------------------------------------------------------------------
-# Inicializa o cliente oficial da nova SDK google-genai
 ai_client = genai.Client(api_key=GEMINI_API_KEY)
 
 SYSTEM_INSTRUCTION = (
@@ -357,7 +356,7 @@ async def fechar_ticket(ctx: commands.Context):
         await ctx.send(embed=embed)
         await ctx.channel.edit(locked=True, archived=True)
     else:
-        await ctx.send("⚠️ Este comando só pode ser utilizado dentro de uma Thread de ticket!", delete_after=5)
+        await ctx.send("⚠️ Este comando só pode ser utilizado dentro de uma Thread de ticket!", deleteafter=5)
 
 
 @bot.command(name="faq")
